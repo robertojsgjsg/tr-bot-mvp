@@ -16,6 +16,7 @@ from telegram.ext import ApplicationBuilder, Application, CommandHandler, Contex
 from .memory.rest import RestMemory, make_fingerprint
 from .providers.base import BaseProvider
 from .providers.dummy import DummyProvider
+from .providers.traderepublic import TradeRepublicProvider
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
@@ -44,9 +45,10 @@ logger = logging.getLogger("bot")
 
 def get_provider(name: str) -> BaseProvider:
     name = (name or "dummy").strip().lower()
+    if name == "traderepublic":
+        return TradeRepublicProvider()
     if name == "dummy":
         return DummyProvider()
-    # Más adelante: TradeRepublicProvider()
     return DummyProvider()
 
 
@@ -198,6 +200,85 @@ async def cmd_forgetall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+async def cmd_buyideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Cooldowns (opcional con Upstash)
+    global_cd_key = "cd:buyideas:global"
+    per_ticker_cd = 45 * 60
+    global_cd = 180 * 60
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0)) as client:
+        mem = None
+        if REDIS_REST_URL and REDIS_REST_TOKEN:
+            mem = RestMemory(REDIS_REST_URL, REDIS_REST_TOKEN, client=client)
+            try:
+                if await mem.exists(global_cd_key):
+                    await update.message.reply_text("⌛ Enfriando /buyideas (cooldown activo). Prueba más tarde.")
+                    return
+            except Exception:
+                pass
+
+        provider = get_provider("traderepublic")
+        try:
+            n = int(context.args[0]) if context.args else TOP_K
+        except Exception:
+            n = TOP_K
+
+        try:
+            ideas = await provider.buyideas(client, top_k=n)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Error al generar ideas: {e}")
+            return
+
+        if not ideas:
+            await update.message.reply_text("Sin ideas claras ahora mismo.")
+            return
+
+        # Mensajes
+        for r in ideas:
+            txt = (
+                f"*{r.symbol}* ({r.name}) — {r.price:.2f}\n"
+                f"*Recomendación:* {r.decision} | *Horizonte:* {r.horizonte}\n"
+                f"*Score:* {r.score}/100 | *Confianza:* {r.confianza} | *Riesgo:* {r.riesgo_cat}\n"
+                f"*Razón:* {r.razon}\n"
+                "— Información educativa; no es consejo financiero —"
+            )
+            await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
+        # Cooldown global
+        if mem:
+            try:
+                await mem.setex(global_cd_key, global_cd, "1")
+            except Exception:
+                pass
+
+
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Uso: /check <ticker|ISIN>")
+        return
+    query = context.args[0].strip()
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0)) as client:
+        provider = get_provider("traderepublic")
+        try:
+            r = await provider.evaluate(client, query)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Error al evaluar {query}: {e}")
+            return
+
+        if not r:
+            await update.message.reply_text(f"No se pudo evaluar '{query}'. Comprueba el ticker/ISIN.")
+            return
+
+        txt = (
+            f"*{r.symbol}* ({r.name}) — {r.price:.2f}\n"
+            f"*Recomendación:* {r.decision} | *Horizonte:* {r.horizonte}\n"
+            f"*Score:* {r.score}/100 | *Confianza:* {r.confianza} | *Riesgo:* {r.riesgo_cat}\n"
+            f"*Razón:* {r.razon}\n"
+            "— Información educativa; no es consejo financiero —"
+        )
+        await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
 
 def build_app() -> Application:
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -209,6 +290,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("meminfo", cmd_meminfo))
     app.add_handler(CommandHandler("forgetall", cmd_forgetall))
+    app.add_handler(CommandHandler("buyideas", cmd_buyideas))
+    app.add_handler(CommandHandler("check", cmd_check))
+
     return app
 
 

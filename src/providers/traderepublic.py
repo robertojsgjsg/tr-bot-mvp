@@ -44,8 +44,13 @@ def _atr14(high: List[float], low: List[float], close: List[float]) -> Optional[
     return sum(trs[-14:]) / 14.0
 
 async def _fh_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Asegurar token también en query string (además del header)
+    if not FINNHUB_API_KEY:
+        return None
     try:
-        r = await client.get(url, params=params, headers=HEADERS, timeout=20.0)
+        q = dict(params or {})
+        q["token"] = FINNHUB_API_KEY
+        r = await client.get(url, params=q, headers=HEADERS, timeout=20.0)
         r.raise_for_status()
         return r.json()
     except Exception:

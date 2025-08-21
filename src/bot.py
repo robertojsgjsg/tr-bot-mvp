@@ -18,6 +18,7 @@ from .providers.base import BaseProvider
 from .providers.dummy import DummyProvider
 from .providers.traderepublic import TradeRepublicProvider
 
+# ---------- ENV ----------
 REDIS_PREFIX = os.getenv("REDIS_PREFIX", "trbot")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
@@ -31,19 +32,56 @@ REDIS_REST_URL = os.getenv("REDIS_REST_URL", "")
 REDIS_REST_TOKEN = os.getenv("REDIS_REST_TOKEN", "")
 PROVIDER_NAME = os.getenv("PROVIDER", "dummy")
 
-# No uses python si no hay token
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
 
 # Path del webhook sin exponer el token
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH") or hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:24]
 
+# ---------- LOG ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
-# Evitar que httpx muestre URLs con el token en los logs
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # evitar logs con token en URL
 logger = logging.getLogger("bot")
 
+# ===== Decoradores de texto con emojis =====
+DISCLAIMER = "— ℹ️ Información educativa; *no es consejo financiero* —"
 
+def deco_decision(dec: str) -> str:
+    mapa = {
+        "COMPRAR": "🟢 COMPRAR",
+        "MANTENER": "🟡 MANTENER",
+        "VENDER": "🔴 VENDER",
+        "EVITAR": "⚪️ EVITAR",
+    }
+    return mapa.get(dec, dec)
+
+def deco_horizon(h: str) -> str:
+    mapa = {
+        "Corto": "⏱️ Corto",
+        "Medio": "🕰️ Medio",
+        "Largo": "🧭 Largo",
+        "Observación": "👀 Observación",
+    }
+    return mapa.get(h, h)
+
+def deco_risk(r: str) -> str:
+    mapa = {
+        "Bajo": "🟩 Bajo",
+        "Medio": "🟨 Medio",
+        "Alto": "🟥 Alto",
+    }
+    return mapa.get(r, r)
+
+def deco_conf(c: str) -> str:
+    mapa = {
+        "Alta": "🔷 Alta",
+        "Media": "🔸 Media",
+        "Baja": "🔹 Baja",
+    }
+    return mapa.get(c, c)
+# ===== Fin helpers =====
+
+# ---------- Proveedor ----------
 def get_provider(name: str) -> BaseProvider:
     name = (name or "dummy").strip().lower()
     if name == "traderepublic":
@@ -52,7 +90,7 @@ def get_provider(name: str) -> BaseProvider:
         return DummyProvider()
     return DummyProvider()
 
-
+# ---------- Utilidades ----------
 def parse_date_arg(arg: str) -> date:
     from datetime import datetime as dt
     for fmt in ("%d/%m/%Y", "%d/%m/%y"):
@@ -61,7 +99,6 @@ def parse_date_arg(arg: str) -> date:
         except ValueError:
             pass
     raise ValueError("Formato de fecha no válido. Usa dd/mm/aaaa (p.ej. 21/08/2025).")
-
 
 def fmt_item(item: Dict[str, Any]) -> str:
     dt_txt = item.get("date", "")
@@ -81,27 +118,20 @@ def fmt_item(item: Dict[str, Any]) -> str:
         f"Fuente: {src}"
     )
 
-
 def build_fingerprint_payload(item: Dict[str, Any]) -> str:
     keys = ["date", "league", "name", "market", "selection"]
     return "|".join(str(item.get(k, "")) for k in keys)
 
-
+# ---------- Handlers ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "¡Hola! 👋\n\n"
-        "Este bot está desplegado con *webhook* en Render y soporta proveedor pluggable.\n"
+        "✨ ¡Bienvenido! Soy tu bot de ideas de mercado.\n\n"
         "Comandos:\n"
-        "/today — elementos de hoy\n"
-        "/tomorrow — elementos de mañana\n"
-        "/picks — por defecto usa DAY_OFFSET_DEFAULT\n"
-        "/day dd/mm/aaaa — fecha concreta\n"
-        "/week — próximos 7 días\n"
-        "/meminfo — info sobre memoria de deduplicación\n"
-        "/forgetall — aviso sobre limitaciones REST\n"
+        "• /check <ticker|ISIN> — diagnóstico 📊\n"
+        "• /buyideas [n] — ideas del día 💡\n"
+        "• /today, /tomorrow, /week — demo (dummy)\n"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
 
 async def _send_items(update: Update, context: ContextTypes.DEFAULT_TYPE, day_from: date, day_to: date, label: str) -> None:
     tz = ZoneInfo(TZ)
@@ -146,24 +176,20 @@ async def _send_items(update: Update, context: ContextTypes.DEFAULT_TYPE, day_fr
         if sent == 0:
             await update.message.reply_text("No hay novedades (todo estaba ya enviado previamente).")
 
-
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tz = ZoneInfo(TZ)
     today = datetime.now(tz).date()
     await _send_items(update, context, today, today, "hoy")
-
 
 async def cmd_tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tz = ZoneInfo(TZ)
     tomorrow = (datetime.now(tz) + timedelta(days=1)).date()
     await _send_items(update, context, tomorrow, tomorrow, "mañana")
 
-
 async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tz = ZoneInfo(TZ)
     d = (datetime.now(tz) + timedelta(days=DAY_OFFSET_DEFAULT)).date()
     await _send_items(update, context, d, d, f"día +{DAY_OFFSET_DEFAULT}")
-
 
 async def cmd_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
@@ -176,13 +202,11 @@ async def cmd_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await _send_items(update, context, d, d, d.strftime("%d/%m/%Y"))
 
-
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tz = ZoneInfo(TZ)
     start = datetime.now(tz).date()
     end = start + timedelta(days=6)
     await _send_items(update, context, start, end, "próximos 7 días")
-
 
 async def cmd_meminfo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
@@ -193,7 +217,6 @@ async def cmd_meminfo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-
 async def cmd_forgetall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "⚠️ *Limpiado masivo no disponible con REST.*\n"
@@ -202,9 +225,9 @@ async def cmd_forgetall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_buyideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Cooldowns (opcional con Upstash)
+    # Cooldowns (Upstash si está configurado)
     global_cd_key = f"{REDIS_PREFIX}:cd:buyideas:global"
-    per_ticker_cd = 45 * 60
+    per_ticker_cd = 45 * 60  # reservado para futuro
     global_cd = 180 * 60
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0)) as client:
@@ -234,14 +257,14 @@ async def cmd_buyideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text("Sin ideas claras ahora mismo.")
             return
 
-        # Mensajes
+        # Mensajes (con emojis)
         for r in ideas:
             txt = (
-                f"*{r.symbol}* ({r.name}) — {r.price:.2f}\n"
-                f"*Recomendación:* {r.decision} | *Horizonte:* {r.horizonte}\n"
-                f"*Score:* {r.score}/100 | *Confianza:* {r.confianza} | *Riesgo:* {r.riesgo_cat}\n"
-                f"*Razón:* {r.razon}\n"
-                "— Información educativa; no es consejo financiero —"
+                f"💡 *{r.symbol}* ({r.name}) — {r.price:.2f}\n"
+                f"{deco_decision(r.decision)} | Horizonte: {deco_horizon(r.horizonte)}\n"
+                f"🧮 Score: *{r.score}/100* | 🤝 Confianza: {deco_conf(r.confianza)} | ⚖️ Riesgo: {deco_risk(r.riesgo_cat)}\n"
+                f"🧠 Razón: {r.razon}\n"
+                f"{DISCLAIMER}"
             )
             await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
@@ -252,12 +275,16 @@ async def cmd_buyideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception:
                 pass
 
-
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Uso: /check <ticker|ISIN>")
+        await update.message.reply_text(
+            "🧾 Dime el *ticker/ISIN o nombre* (p. ej. `AAPL` o `Apple Inc`).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
-    query = context.args[0].strip()
+
+    # Acepta nombres con espacios
+    query = " ".join(context.args).strip()
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0)) as client:
         provider = get_provider("traderepublic")
@@ -272,15 +299,15 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         txt = (
-            f"*{r.symbol}* ({r.name}) — {r.price:.2f}\n"
-            f"*Recomendación:* {r.decision} | *Horizonte:* {r.horizonte}\n"
-            f"*Score:* {r.score}/100 | *Confianza:* {r.confianza} | *Riesgo:* {r.riesgo_cat}\n"
-            f"*Razón:* {r.razon}\n"
-            "— Información educativa; no es consejo financiero —"
+            f"📊 *{r.symbol}* ({r.name}) — {r.price:.2f}\n"
+            f"{deco_decision(r.decision)} | Horizonte: {deco_horizon(r.horizonte)}\n"
+            f"🧮 Score: *{r.score}/100* | 🤝 Confianza: {deco_conf(r.confianza)} | ⚖️ Riesgo: {deco_risk(r.riesgo_cat)}\n"
+            f"🧠 Razón: {r.razon}\n"
+            f"{DISCLAIMER}"
         )
         await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
-
+# ---------- App ----------
 def build_app() -> Application:
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
@@ -293,9 +320,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("forgetall", cmd_forgetall))
     app.add_handler(CommandHandler("buyideas", cmd_buyideas))
     app.add_handler(CommandHandler("check", cmd_check))
-
     return app
-
 
 def main() -> None:
     app = build_app()
@@ -319,7 +344,6 @@ def main() -> None:
     # Fallback a polling si no hay URL pública
     logger.info("WEBHOOK_URL/RENDER_EXTERNAL_URL not set; polling mode")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()

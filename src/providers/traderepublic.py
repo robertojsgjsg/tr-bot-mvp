@@ -9,17 +9,21 @@ import httpx
 
 from .base import BaseProvider
 
+# === Config ===
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 BENCHMARK = os.getenv("BENCHMARK", "SPY").strip()
+
+# Universo para /buyideas (puedes sobreescribir con UNIVERSE_TICKERS en ENV)
 _UNIVERSE_ENV = [s.strip() for s in os.getenv("UNIVERSE_TICKERS", "").split(",") if s.strip()]
 DEFAULT_UNIVERSE = _UNIVERSE_ENV or [
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","JPM",
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX","ADBE","COST","PEP","ORCL",
     "SPY","QQQ","IWM","VTI","VOO","EFA","EEM",
-    "ASML","SAP","SHEL","OR","NVO"
+    "ASML","SAP","NVO"
 ]
 
 HEADERS = {"X-Finnhub-Token": FINNHUB_API_KEY} if FINNHUB_API_KEY else {}
 
+# === Utils ===
 def _sma(vals: List[float], n: int) -> Optional[float]:
     if len(vals) < n:
         return None
@@ -43,49 +47,53 @@ def _atr14(high: List[float], low: List[float], close: List[float]) -> Optional[
         return None
     return sum(trs[-14:]) / 14.0
 
-async def _fh_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # Asegurar token también en query string (además del header)
+async def _fh_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """GET a Finnhub endpoint ensuring token is in query and raising useful errors."""
     if not FINNHUB_API_KEY:
-        return None
+        raise RuntimeError("FINNHUB_API_KEY vacío")
+    q = dict(params or {})
+    q["token"] = FINNHUB_API_KEY
     try:
-        q = dict(params or {})
-        q["token"] = FINNHUB_API_KEY
         r = await client.get(url, params=q, headers=HEADERS, timeout=20.0)
         r.raise_for_status()
         return r.json()
     except httpx.HTTPStatusError as e:
-        # Propagar con detalle útil (401/429/etc.)
-        raise RuntimeError(f"finnhub {e.response.status_code}: {e.response.text[:200]}")
+        # Propaga info útil (401/429/etc.)
+        body = e.response.text[:200] if e.response is not None else str(e)
+        raise RuntimeError(f"finnhub {e.response.status_code}: {body}")
     except Exception as e:
         raise RuntimeError(f"finnhub error: {e}")
 
 async def _candles(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
     end = int(datetime.utcnow().timestamp())
     start = end - days * 86400
-    js = await _fh_json(client, "https://finnhub.io/api/v1/stock/candle",
-                        {"symbol": symbol, "resolution": "D", "from": start, "to": end})
-    if not js:
-        raise RuntimeError("candles: sin respuesta")
+    js = await _fh_json(
+        client,
+        "https://finnhub.io/api/v1/stock/candle",
+        {"symbol": symbol, "resolution": "D", "from": start, "to": end},
+    )
     if js.get("s") != "ok":
-        # no_data, 401, 429, etc.
         raise RuntimeError(f"candles: estado={js.get('s')}")
     return js  # keys: c,h,l,o,t,v
 
-async def _quote(client: httpx.AsyncClient, symbol: str) -> Optional[Dict[str, Any]]:
+async def _quote(client: httpx.AsyncClient, symbol: str) -> Dict[str, Any]:
     return await _fh_json(client, "https://finnhub.io/api/v1/quote", {"symbol": symbol})
 
 async def _search_symbol(client: httpx.AsyncClient, query: str) -> Optional[Tuple[str, str]]:
-    """Returns (symbol, description). Accepts ticker or ISIN in query."""
+    """Devuelve (symbol, description). Acepta ticker o ISIN."""
     js = await _fh_json(client, "https://finnhub.io/api/v1/search", {"q": query})
-    if not js or not js.get("result"):
+    res = js.get("result") or []
+    if not res:
         return None
-    # Prefer exact symbol match; else first result
-    for it in js["result"]:
-        if it.get("symbol", "").upper() == query.upper():
+    # Prioriza coincidencia exacta de symbol
+    for it in res:
+        sym = (it.get("symbol") or "").upper()
+        if sym == query.upper():
             return it["symbol"], (it.get("description") or it["symbol"])
-    it0 = js["result"][0]
+    it0 = res[0]
     return it0.get("symbol"), (it0.get("description") or it0.get("symbol") or query)
 
+# === Modelos de salida ===
 @dataclass
 class EvalResult:
     symbol: str
@@ -95,17 +103,18 @@ class EvalResult:
     confianza: str
     riesgo_cat: str
     horizonte: str
-    decision: str  # COMPRAR / MANTENER / VENDER / EVITAR
+    decision: str   # COMPRAR / MANTENER / VENDER / EVITAR
     razon: str
 
+# === Proveedor principal ===
 class TradeRepublicProvider(BaseProvider):
-    """Proveedor basado en Finnhub con señales S1/S2/S3."""
+    """Proveedor (basado en Finnhub) con señales S1/S2/S3."""
 
     async def get_items(self, day_from: date, day_to: date, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
-        # No usamos este método en este proveedor para el MVP.
+        # No se usa en este MVP (se usa /buyideas y /check)
         return []
 
-    # ---------- Señales ----------
+    # -------- Señales ----------
     def _signals(
         self,
         close: List[float],
@@ -117,12 +126,13 @@ class TradeRepublicProvider(BaseProvider):
     ) -> Dict[str, Any]:
         ret1d = _ret(close, 1) or 0.0
         ret5d = _ret(close, 5) or 0.0
+
         s1 = ((ret1d >= 0.01) or (ret5d >= 0.03)) and (ma20 is not None and close[-1] > 1.005 * ma20)
 
         s2_parts = 0
         if ma50 is not None and ma200 is not None and close[-1] > ma50 > ma200:
             s2_parts += 1
-        # pendiente MA50 positiva (aproximada)
+        # Pendiente MA50 positiva (aprox)
         s2_slope = False
         if len(close) >= 260:
             recent = sum(close[-50:]) / 50.0
@@ -146,7 +156,13 @@ class TradeRepublicProvider(BaseProvider):
 
         return {"ret1d": ret1d, "ret5d": ret5d, "s1": s1, "s2": s2, "s2_parts": s2_parts, "s3": s3}
 
-    def _risk_and_score(self, high: List[float], low: List[float], close: List[float], sig: Dict[str, Any]) -> Tuple[str, int, str, str]:
+    def _risk_and_score(
+        self,
+        high: List[float],
+        low: List[float],
+        close: List[float],
+        sig: Dict[str, Any],
+    ) -> Tuple[str, int, str, str]:
         atr = _atr14(high, low, close)
         price = close[-1]
         riesgo = "Medio"
@@ -175,44 +191,51 @@ class TradeRepublicProvider(BaseProvider):
         if not FINNHUB_API_KEY:
             raise RuntimeError("Falta FINNHUB_API_KEY")
 
+        # Buscar símbolo (acepta ticker o ISIN)
         sym_desc = await _search_symbol(client, query)
         if not sym_desc:
-            return None
+            raise RuntimeError("search: sin resultados para el ticker/ISIN")
         symbol, name = sym_desc
 
-        sym_desc = await _search_symbol(client, query)
-if not sym_desc:
-    raise RuntimeError("search: sin resultados para el ticker/ISIN")
-symbol, name = sym_desc
-
-cd = await _candles(client, symbol, days=420)
-c, h, l = cd["c"], cd["h"], cd["l"]
-if not c or len(c) < 30:   # Antes pedíamos 60; bajamos a 30 para ser más tolerantes
-    raise RuntimeError(f"candles: serie demasiado corta len={len(c) if c else 0}")
+        # Velas del símbolo
+        cd = await _candles(client, symbol, days=420)
+        c, h, l = cd["c"], cd["h"], cd["l"]
+        if not c or len(c) < 30:
+            raise RuntimeError(f"candles: serie demasiado corta len={len(c) if c else 0}")
 
         ma20 = _sma(c, 20)
         ma50 = _sma(c, 50)
         ma200 = _sma(c, 200)
         sym_ret63 = _ret(c, 63)
 
-        bench_cd = await _candles(client, BENCHMARK, days=420)
-        bench_ret63 = _ret(bench_cd["c"], 63) if bench_cd and bench_cd.get("c") else None
+        # Velas del benchmark (para fuerza relativa)
+        bench_ret63: Optional[float] = None
+        try:
+            bench_cd = await _candles(client, BENCHMARK, days=420)
+            bench_ret63 = _ret(bench_cd["c"], 63) if bench_cd and bench_cd.get("c") else None
+        except Exception:
+            bench_ret63 = None  # si falla benchmark, seguimos sin RS
 
+        # Señales y métricas
         sig = self._signals(c, ma20, ma50, ma200, bench_ret63, sym_ret63)
         riesgo, score, confianza, horizonte = self._risk_and_score(h, l, c, sig)
 
-        decision = "EVITAR"
+        # Decisión
         if sig["s3"]:
             decision = "VENDER"
         elif sig["s1"] and not sig["s3"]:
             decision = "COMPRAR"
         elif sig["s2"]:
             decision = "MANTENER"
+        else:
+            decision = "EVITAR"
 
+        # Precio actual
         qt = await _quote(client, symbol)
         price = float(qt.get("c") or c[-1]) if qt else float(c[-1])
 
-        razones = []
+        # Razón breve
+        razones: List[str] = []
         if sig["s1"]:
             razones.append("S1 activo (mom. 1D/5D y sobre MA20)")
         if sig["s2"]:
@@ -244,6 +267,7 @@ if not c or len(c) < 30:   # Antes pedíamos 60; bajamos a 30 para ser más tole
                 if r and (r.decision in ("COMPRAR", "MANTENER")):
                     out.append(r)
             except Exception:
+                # Ignora símbolos con no_data/límites/etc.
                 continue
         out.sort(key=lambda x: x.score, reverse=True)
         return out[:max(1, top_k)]

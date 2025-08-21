@@ -203,7 +203,7 @@ async def cmd_forgetall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_buyideas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Cooldowns (opcional con Upstash)
-    global_cd_key = "cd:buyideas:global"
+    global_cd_key = f"{REDIS_PREFIX}:cd:buyideas:global"
     per_ticker_cd = 45 * 60
     global_cd = 180 * 60
 

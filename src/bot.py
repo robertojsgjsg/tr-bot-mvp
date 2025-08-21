@@ -18,6 +18,7 @@ from .providers.base import BaseProvider
 from .providers.dummy import DummyProvider
 from .providers.traderepublic import TradeRepublicProvider
 
+REDIS_PREFIX = os.getenv("REDIS_PREFIX", "trbot")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", "10000"))

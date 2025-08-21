@@ -66,8 +66,11 @@ async def _fh_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) 
 
 async def _candles(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
     """
-    Intenta Finnhub; si no hay acceso/datos, cae a Yahoo Finance.
+    1) Finnhub (si plan/permite)
+    2) Yahoo (con User-Agent)
+    3) Stooq (CSV) como último recurso
     """
+    # 1) Finnhub
     try:
         end = int(datetime.utcnow().timestamp())
         start = end - days * 86400
@@ -78,21 +81,32 @@ async def _candles(client: httpx.AsyncClient, symbol: str, days: int = 420) -> D
         )
         if js.get("s") == "ok":
             return js
-        # estados típicos: 'no_data'
+        # Si no es ok, forzamos fallback
         raise RuntimeError(f"candles finnhub estado={js.get('s')}")
     except Exception:
-        # Fallback a Yahoo
+        pass
+
+    # 2) Yahoo
+    try:
         return await _candles_yahoo(client, symbol, days=days)
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 429:
+            # 3) Stooq si Yahoo nos rate-limita
+            return await _candles_stooq(client, symbol, days=days)
+        raise
+    except Exception:
+        # 3) Stooq si Yahoo falla por cualquier otro motivo
+        return await _candles_stooq(client, symbol, days=days)
 
 async def _quote(client: httpx.AsyncClient, symbol: str) -> Dict[str, Any]:
     return await _fh_json(client, "https://finnhub.io/api/v1/quote", {"symbol": symbol})
 
 async def _candles_yahoo(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
     """
-    Fallback a Yahoo Finance para velas diarias cuando Finnhub devuelve 403/no_data.
-    No requiere API key. Devuelve dict con keys c,h,l (listas) y s="ok".
+    Fallback a Yahoo Finance para velas diarias cuando Finnhub falla.
+    Devuelve dict con keys c,h,l y s="ok".
     """
-    # Rango aproximado en función de días solicitados
+    # Rango según days
     if days <= 365:
         rng = "1y"
     elif days <= 730:
@@ -104,7 +118,8 @@ async def _candles_yahoo(client: httpx.AsyncClient, symbol: str, days: int = 420
 
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {"interval": "1d", "range": rng}
-    r = await client.get(url, params=params, timeout=20.0)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = await client.get(url, params=params, headers=headers, timeout=20.0)
     r.raise_for_status()
     js = r.json()
     res = (js.get("chart", {}).get("result") or [None])[0]
@@ -116,7 +131,6 @@ async def _candles_yahoo(client: httpx.AsyncClient, symbol: str, days: int = 420
     c_raw = q.get("close") or []
     h_raw = q.get("high") or []
     l_raw = q.get("low") or []
-    # Filtra None manteniendo alineación
     c, h, l = [], [], []
     for ci, hi, li in zip(c_raw, h_raw, l_raw):
         if ci is None or hi is None or li is None:
@@ -126,6 +140,45 @@ async def _candles_yahoo(client: httpx.AsyncClient, symbol: str, days: int = 420
         l.append(float(li))
     if len(c) < 30:
         raise RuntimeError("yahoo: serie demasiado corta")
+    return {"s": "ok", "c": c, "h": h, "l": l}
+
+async def _candles_stooq(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
+    """
+    Segundo fallback: Stooq CSV gratuito (no requiere API key).
+    Para tickers USA: aapl.us, spy.us, qqq.us...
+    """
+    def map_stooq(sym: str) -> str:
+        s = sym.lower()
+        # Si ya trae sufijo (p.ej. .de, .us), respétalo
+        if "." in s:
+            return s
+        # Por defecto, asumimos USA
+        return f"{s}.us"
+
+    s = map_stooq(symbol)
+    url = "https://stooq.com/q/d/l/"
+    params = {"s": s, "i": "d"}
+    r = await client.get(url, params=params, timeout=20.0)
+    r.raise_for_status()
+    text = r.text.strip()
+    lines = text.splitlines()
+    if not lines or lines[0].lower().startswith("<!doctype"):
+        raise RuntimeError("stooq: respuesta HTML inesperada")
+    # CSV: Date,Open,High,Low,Close,Volume
+    c, h, l = [], [], []
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) < 6:
+            continue
+        try:
+            close = float(parts[4])
+            high = float(parts[2])
+            low  = float(parts[3])
+        except ValueError:
+            continue
+        c.append(close); h.append(high); l.append(low)
+    if len(c) < 30:
+        raise RuntimeError("stooq: serie demasiado corta")
     return {"s": "ok", "c": c, "h": h, "l": l}
 
 async def _search_symbol(client: httpx.AsyncClient, query: str) -> Optional[Tuple[str, str]]:

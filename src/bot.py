@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+# Evitar que httpx muestre URLs con el token en los logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
 from datetime import datetime, timedelta, date
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
@@ -27,7 +31,8 @@ MEMORY_NAMESPACE = os.getenv("MEMORY_NAMESPACE", "pickmem")
 REDIS_REST_URL = os.getenv("REDIS_REST_URL", "")
 REDIS_REST_TOKEN = os.getenv("REDIS_REST_TOKEN", "")
 PROVIDER_NAME = os.getenv("PROVIDER", "dummy")
-
+# Path del webhook sin exponer el token (24 chars del hash del token)
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH") or hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:24]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 logger = logging.getLogger("bot")
 
@@ -179,10 +184,16 @@ def main() -> None:
     app = build_app()
     if WEBHOOK_URL:
         url = WEBHOOK_URL.rstrip("/")
-        path = TELEGRAM_BOT_TOKEN
-        full = f"{url}/{path}"
-        logger.info("Starting webhook at %s", full)
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=path, webhook_url=full)
+path = WEBHOOK_PATH
+full = f"{url}/{path}"
+# No exponemos el token ni el path real en logs
+logger.info("Starting webhook at %s/<redacted>", url)
+app.run_webhook(
+    listen="0.0.0.0",
+    port=PORT,
+    url_path=path,
+    webhook_url=full,
+)
     else:
         logger.info("WEBHOOK_URL not set; polling mode")
         app.run_polling()

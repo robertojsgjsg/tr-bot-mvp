@@ -65,19 +65,68 @@ async def _fh_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) 
         raise RuntimeError(f"finnhub error: {e}")
 
 async def _candles(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
-    end = int(datetime.utcnow().timestamp())
-    start = end - days * 86400
-    js = await _fh_json(
-        client,
-        "https://finnhub.io/api/v1/stock/candle",
-        {"symbol": symbol, "resolution": "D", "from": start, "to": end},
-    )
-    if js.get("s") != "ok":
-        raise RuntimeError(f"candles: estado={js.get('s')}")
-    return js  # keys: c,h,l,o,t,v
+    """
+    Intenta Finnhub; si no hay acceso/datos, cae a Yahoo Finance.
+    """
+    try:
+        end = int(datetime.utcnow().timestamp())
+        start = end - days * 86400
+        js = await _fh_json(
+            client,
+            "https://finnhub.io/api/v1/stock/candle",
+            {"symbol": symbol, "resolution": "D", "from": start, "to": end},
+        )
+        if js.get("s") == "ok":
+            return js
+        # estados típicos: 'no_data'
+        raise RuntimeError(f"candles finnhub estado={js.get('s')}")
+    except Exception:
+        # Fallback a Yahoo
+        return await _candles_yahoo(client, symbol, days=days)
 
 async def _quote(client: httpx.AsyncClient, symbol: str) -> Dict[str, Any]:
     return await _fh_json(client, "https://finnhub.io/api/v1/quote", {"symbol": symbol})
+
+async def _candles_yahoo(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
+    """
+    Fallback a Yahoo Finance para velas diarias cuando Finnhub devuelve 403/no_data.
+    No requiere API key. Devuelve dict con keys c,h,l (listas) y s="ok".
+    """
+    # Rango aproximado en función de días solicitados
+    if days <= 365:
+        rng = "1y"
+    elif days <= 730:
+        rng = "2y"
+    elif days <= 1825:
+        rng = "5y"
+    else:
+        rng = "10y"
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"interval": "1d", "range": rng}
+    r = await client.get(url, params=params, timeout=20.0)
+    r.raise_for_status()
+    js = r.json()
+    res = (js.get("chart", {}).get("result") or [None])[0]
+    if not res:
+        raise RuntimeError("yahoo: sin resultado")
+    q = (res.get("indicators", {}).get("quote") or [None])[0]
+    if not q:
+        raise RuntimeError("yahoo: sin 'quote'")
+    c_raw = q.get("close") or []
+    h_raw = q.get("high") or []
+    l_raw = q.get("low") or []
+    # Filtra None manteniendo alineación
+    c, h, l = [], [], []
+    for ci, hi, li in zip(c_raw, h_raw, l_raw):
+        if ci is None or hi is None or li is None:
+            continue
+        c.append(float(ci))
+        h.append(float(hi))
+        l.append(float(li))
+    if len(c) < 30:
+        raise RuntimeError("yahoo: serie demasiado corta")
+    return {"s": "ok", "c": c, "h": h, "l": l}
 
 async def _search_symbol(client: httpx.AsyncClient, query: str) -> Optional[Tuple[str, str]]:
     """Devuelve (symbol, description). Acepta ticker o ISIN."""

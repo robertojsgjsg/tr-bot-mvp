@@ -53,16 +53,22 @@ async def _fh_json(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) 
         r = await client.get(url, params=q, headers=HEADERS, timeout=20.0)
         r.raise_for_status()
         return r.json()
-    except Exception:
-        return None
+    except httpx.HTTPStatusError as e:
+        # Propagar con detalle útil (401/429/etc.)
+        raise RuntimeError(f"finnhub {e.response.status_code}: {e.response.text[:200]}")
+    except Exception as e:
+        raise RuntimeError(f"finnhub error: {e}")
 
-async def _candles(client: httpx.AsyncClient, symbol: str, days: int = 400) -> Optional[Dict[str, Any]]:
+async def _candles(client: httpx.AsyncClient, symbol: str, days: int = 420) -> Dict[str, Any]:
     end = int(datetime.utcnow().timestamp())
     start = end - days * 86400
     js = await _fh_json(client, "https://finnhub.io/api/v1/stock/candle",
                         {"symbol": symbol, "resolution": "D", "from": start, "to": end})
-    if not js or js.get("s") != "ok":
-        return None
+    if not js:
+        raise RuntimeError("candles: sin respuesta")
+    if js.get("s") != "ok":
+        # no_data, 401, 429, etc.
+        raise RuntimeError(f"candles: estado={js.get('s')}")
     return js  # keys: c,h,l,o,t,v
 
 async def _quote(client: httpx.AsyncClient, symbol: str) -> Optional[Dict[str, Any]]:
@@ -174,12 +180,15 @@ class TradeRepublicProvider(BaseProvider):
             return None
         symbol, name = sym_desc
 
-        cd = await _candles(client, symbol, days=420)
-        if not cd:
-            return None
-        c, h, l = cd["c"], cd["h"], cd["l"]
-        if not c or len(c) < 60:
-            return None
+        sym_desc = await _search_symbol(client, query)
+if not sym_desc:
+    raise RuntimeError("search: sin resultados para el ticker/ISIN")
+symbol, name = sym_desc
+
+cd = await _candles(client, symbol, days=420)
+c, h, l = cd["c"], cd["h"], cd["l"]
+if not c or len(c) < 30:   # Antes pedíamos 60; bajamos a 30 para ser más tolerantes
+    raise RuntimeError(f"candles: serie demasiado corta len={len(c) if c else 0}")
 
         ma20 = _sma(c, 20)
         ma50 = _sma(c, 50)
